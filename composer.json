@@ -1,0 +1,34 @@
+{
+  "name": "drush/site-merge",
+  "description": "Merges multi-site configurations from source configs. This is different from config-merge which merges individual sites with their upstream counterparts.",
+  "license": "GPL-2.0+",
+  "keywords": ["drush"],
+  "minimum-stability": "dev",
+  "prefer-stable": true,
+  "authors": [
+    { "name": "Chris Porter", "email": "cporter@gmail.com" }
+  ],
+  "support": {
+  },
+  "require": {
+    "php": ">=5.5.0"
+  },
+  "require-dev": {
+    "phpunit/phpunit": ">=3.5"
+  },
+  "autoload": {
+    "psr-0": {
+      "Drush":        "lib/"
+    }
+  },
+  "autoload-dev": {
+    "psr-0": {
+      "Unish":        "tests/"
+    }
+  },
+  "extra": {
+    "branch-alias": {
+        "dev-master": "8.0.x-dev"
+    }
+  }
+}
