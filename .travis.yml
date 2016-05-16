@@ -9,7 +9,7 @@ install:
   - composer self-update
   - export PATH="$HOME/drush:$PATH"
   - export DRUSH_DIR=~/drush
-  - git clone https://github.com/netw3rker/drush.git $DRUSH_DIR
+  - git clone https://github.com/drush-ops/drush.git $DRUSH_DIR
   - cd $DRUSH_DIR
   - git checkout $DRUSH_VERSION
   # Install Drush composer dependencies
