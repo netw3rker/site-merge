@@ -37,7 +37,6 @@ function site_merge_drush_command() {
       'target' => 'The site config to merge updates from source into.',
     ),
     'options' => array(
-//      'destination' => "A config directory label (i.e. a key in \$config_directories array in settings.php). Defaults to 'sync'",
       'label' => 'The config label to use. This can be more specific with source-label and target-label.',
       'source-label' => 'The config label to use for the source system',
       'target-label' => 'The config label to use for the destination/target.',
@@ -177,8 +176,9 @@ function drush_site_merge_init($source, $destination) {
 function drush_site_merge_validate($source, $destination) {
   $source_settings = drush_sitealias_overlay_options(drush_sitealias_get_record($source), 'source-');
   $destination_settings = drush_sitealias_overlay_options(drush_sitealias_get_record($destination), 'target-');
-  $source_config = drush_site_merge_get_config_spec($source_settings, FALSE, 'source-');
-  $target_config = drush_site_merge_get_config_spec($destination_settings, FALSE, 'target-');
+  $source_configs = drush_site_merge_get_config_spec($source_settings, FALSE, 'source-');
+  $target_configs = drush_site_merge_get_config_spec($destination_settings, FALSE, 'target-');
+  $source = array();
 }
 
 /**
@@ -189,7 +189,15 @@ function drush_site_merge_validate($source, $destination) {
  * @param $config_label
  *   Which configuration set (active, etaging, etc.) to operate on
  */
-function drush_site_merge($source = '', $target = '') {
+function drush_site_merge($source = '', $destination = '') {
+  $source_settings = drush_sitealias_overlay_options(drush_sitealias_get_record($source), 'source-');
+  $destination_settings = drush_sitealias_overlay_options(drush_sitealias_get_record($destination), 'target-');
+
+  $source_configs = drush_site_merge_get_config_spec($source_settings, FALSE, 'source-');
+  $target_configs = drush_site_merge_get_config_spec($destination_settings, FALSE, 'target-');
+
+  $source_options = drush_get_merged_prefixed_options('source-');
+  $target_options = drush_get_merged_prefixed_options('target-');
 
   //TODO: add a mark as merged without merging feature, so that sites that don't need the functionality can have it appear to be merged and removed.
   //TODO: add an all sites option
@@ -222,43 +230,30 @@ function drush_site_merge($source = '', $target = '') {
 
   // Figure out what our base commit is going to be for this operation.
   $merge_info = array(
-    'mypath' => drush_cwd(),
-    'configuration_path' => config_get_config_directory(drush_get_option('label', 'vcs')),
-    'base' => drush_get_option('base', FALSE),
-    'message' => drush_get_option('message', ''),
-    'commit' => !drush_get_option('commit', FALSE),
+    'source-configuration_path' => $source_configs[drush_get_option('source-label', drush_get_option('label', 'vcs'))],
+    'target-configuration_path' => $target_configs[drush_get_option('target-label', drush_get_option('label', 'vcs'))],
+    'ancestor' => drush_get_option('ancestor', FALSE),
     'temp' => drush_get_option('temp', TRUE),
-    'label' => drush_get_option('label', 'vcs'),
-    'source-label' => drush_get_option('source-label', drush_get_option('label', 'vcs')),
-    'target-label' => drush_get_option('target-label', drush_get_option('label', 'vcs')),
   );
 
-  print_r($merge_info);
-
-
   //STEP 1: create a temp repo
+  $result['GITREPO_CLEAR'] = drush_shell_cd_and_exec("/tmp", 'rm -rf /tmp/site-merge');
   $result['GITREPO_BUILD'] = drush_shell_cd_and_exec("/tmp", 'git init /tmp/site-merge');
 
   //STEP 2: get the ancestor code in
 
   //go back in time and get the code for the source config
-  $result += _drush_site_merge_copy_config($merge_info['configuration_path'], $merge_info['commit']);
+  $result += _drush_site_merge_copy_config($merge_info['source-configuration_path'], $merge_info['ancestor'], 'ANCESTOR');
 
   // Now create a branch to indicate the site moved on.
   $result['TARGET_BRANCH'] = drush_shell_cd_and_exec("/tmp/site-merge", 'git branch target_site HEAD');
 
   //STEP 3: update the code for the SOURCE config
-
-  $result += _drush_site_merge_copy_config($merge_info['configuration_path']);
-
-  // now commit all the changes.
-  $result['SOURCE_COMMIT'] = drush_shell_cd_and_exec("/tmp/site-merge", 'git add -A .;git commit -m \'latest source code\'');
+  $result += _drush_site_merge_copy_config($merge_info['source-configuration_path'], 'HEAD', 'SOURCE');
 
   //STEP 4: update the code for the TARGET config
   $result['TARGET_CHECKOUT'] = drush_shell_cd_and_exec("/tmp/site-merge", 'git checkout target_site');
-
-  //TODO: Figure out where the source/target config locations are stored/referenced
-  $result += _drush_site_merge_copy_config($merge_info['target_configuration_path']);
+  $result += _drush_site_merge_copy_config($merge_info['target-configuration_path'], 'HEAD', 'TARGET');
 
   //STEP 5: Merge the two configs.
   // finally, merge the code from target into master, creating a code base where
@@ -268,22 +263,22 @@ function drush_site_merge($source = '', $target = '') {
   $result['TARGET_SWITCH'] = drush_shell_cd_and_exec("/tmp/site-merge", 'git checkout master');
   $result['TARGET_MERGE'] = drush_shell_cd_and_exec("/tmp/site-merge", 'git merge target_site');
 
-  //TODO: Depending on the result here, we'll want to end processing to allow
-  //todo: users to resolve any conflicts. If there are no conflicts, then we can
-  //todo: wrap this up and copy the result from the temp repo to the actual repo.
 
   if($result['TARGET_MERGE']) {
-    $result['MAINREPO_CLEAR'] = drush_shell_cd_and_exec("/tmp/site-merge", 'find . -path ./.git -prune -o -exec rm -rf {} \; 2> /dev/null');
-    $result['MAINREPO_COPY'] = drush_shell_cd_and_exec("/tmp/site-merge", 'cp -r . %s', $merge_info['target_configuration_path']);
+    $result['MAINREPO_CLEAR'] = drush_shell_cd_and_exec($merge_info['target-configuration_path'], 'find . -path ./.git -prune -o -exec rm -rf {} \; 2> /dev/null');
+    $result['MAINREPO_COPY'] = drush_shell_cd_and_exec("/tmp/site-merge", 'cp -r . %s', $merge_info['target-configuration_path']);
   }
-
+  else {
+    //TODO: implement the --continue option
+    drush_set_error("MERGE_CONFLICTS", "Merge conflicts were detected. Please resolve this in /tmp/site-merge, then run this command with --continue");
+  }
   return $result;
 }
 
-function _drush_site_merge_copy_config($configpath, $commit = 'HEAD') {
-  $result['TARGET_CLEAR'] = drush_shell_cd_and_exec("/tmp/site-merge", 'find . -path ./.git -prune -o -exec rm -rf {} \; 2> /dev/null');
-
-  $result['TARGET_COPY'] = drush_shell_cd_and_exec($configpath, 'git archive --prefix=/ %s ./ --format=tar | tar zxf - -C /tmp/site-merge/', $commit);
+function _drush_site_merge_copy_config($configpath, $commit = 'HEAD', $debugname = '') {
+  $result[$debugname.'_CLEAR'] = drush_shell_cd_and_exec("/tmp/site-merge", 'find . -path ./.git -prune -o -exec rm -rf {} \; 2> /dev/null');
+  $result[$debugname.'_COPY'] = drush_shell_cd_and_exec($configpath, 'git archive --prefix=/ %s ./ --format=tar | tar zxf - -C /tmp/site-merge/', $commit);
+  $result[$debugname.'_COMMIT'] = drush_shell_cd_and_exec("/tmp/site-merge", 'git add -A .;git commit -m \'latest %s source code\'', $debugname);
 
   return $result;
 }
