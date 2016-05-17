@@ -15,17 +15,33 @@ use Symfony\Component\Yaml\Parser;
  */
 function site_merge_drush_command() {
   $items = array();
+  $items['site-merge-conf'] = array(
+    'description' => 'Print configuration path details using print_r().',
+    'hidden' => TRUE,
+    'bootstrap' => DRUSH_BOOTSTRAP_NONE,
+    'options' => array(
+      'all' => 'Show all database connections, instead of just one.',
+      ),
+    'outputformat' => array(
+      'default' => 'print-r',
+      'pipe-format' => 'var_export',
+      'private-fields' => 'password',
+    ),
+  );
 
   $items['site-merge'] = array(
     'description' => 'Merge configuration data from two sites or environments.',
     'aliases' => array('sm'),
     'arguments' => array(
-      'site' => 'Source Configuration',
-      'label' => "A config directory label (i.e. a key in \$config_directories array in settings.php). Defaults to 'sync'",
+      'source' => 'Source Configuration',
+      'target' => 'The site config to merge updates from source into.',
     ),
     'options' => array(
-      'base' => 'The commit hash or tag for the base of the three-way merge operation.  This should be the most recent commit that was deployed to the site specified in the first argument.',
-      'ancestor' => 'The location in the git history where the last successful merge took place',
+//      'destination' => "A config directory label (i.e. a key in \$config_directories array in settings.php). Defaults to 'sync'",
+      'label' => 'The config label to use. This can be more specific with source-label and target-label.',
+      'source-label' => 'The config label to use for the source system',
+      'target-label' => 'The config label to use for the destination/target.',
+      'ancestor' => 'The location in the git history where the last successful merge took place. If left blank, this will look in the target config for a stored value indicating the last successful merge.',
     ),
     'examples' => array(
       'drush site-merge [sourcelocation] [targetlocation] --ancestor=C1B2DF' => 'Merge configuration changes from the default site with the configuration changes made on the target site.',
@@ -77,6 +93,94 @@ function site_merge_drush_help($section) {
   }
 }
 
+
+/**
+ * Command callback. Displays the Drupal site's configuration locations.
+ * This is necessary in order to 'fake-add' the config values to the two sites
+ * specified as parameters.
+ */
+function drush_site_merge_conf() {
+  drush_sql_bootstrap_database_configuration();
+  global $config_directories;
+
+  return $config_directories;
+}
+
+function drush_site_merge_cache_config_settings(&$alias_record, $config_directories) {
+  if (!empty($config_directories)) {
+    $alias_record['config_directories'] = $config_directories;
+  }
+
+  // If the name is set, then re-cache the record after we fetch the databases
+  if (array_key_exists('#name', $alias_record)) {
+    $all_site_aliases =& drush_get_context('site-aliases');
+    $all_site_aliases['@' . $alias_record['#name']] = $alias_record;
+    // Check and see if this record is a copy of 'self'
+    if (($alias_record['#name'] != 'self') && array_key_exists('@self', $all_site_aliases) && array_key_exists('#name', $all_site_aliases['@self']) && ($all_site_aliases['@self']['#name'] == $alias_record['#name'])) {
+      $all_site_aliases['@self'] = $alias_record;
+    }
+  }
+}
+
+function drush_site_merge_add_config_settings(&$alias_record) {
+  $altered_record = FALSE;
+  if (isset($alias_record['root'])) {
+    // If the alias record does not have a defined 'config_directories' entry,
+    // then we'll need to look one up
+    if (!isset($alias_record['config_directories']) && !isset($alias_record['site-list'])) {
+      $values = drush_invoke_process($alias_record, "site-merge-conf", array(), array('all' => TRUE), array('integrate' => FALSE, 'override-simulated' => TRUE));
+      if (is_array($values) && ($values['error_status'] == 0)) {
+        $altered_record = TRUE;
+        // If there are any special settings in the '@self' record returned by drush_invoke_process,
+        // then add those into our altered record as well
+        if (array_key_exists('self', $values)) {
+          $alias_record = array_merge($values['self'], $alias_record);
+        }
+        drush_site_merge_cache_config_settings($alias_record, $values['object']);
+      }
+    }
+  }
+  return $altered_record;
+}
+
+
+function drush_site_merge_get_config_spec(&$alias_record, $default_to_self = FALSE, $prefix = '') {
+  $altered_record = drush_site_merge_add_config_settings($alias_record);
+
+  return array_key_exists('config_directories', $alias_record) ? $alias_record['config_directories'] : NULL;
+}
+
+
+
+/*
+ * Implements COMMAND hook init. The goal here is to allow this command to get
+ * settings/config paths for both the source and the target folders.
+ *
+ * this was copied from sql-sync which does the same thing
+ */
+function drush_site_merge_init($source, $destination) {
+  // Try to get @self defined when --uri was not provided.
+  drush_bootstrap_max(DRUSH_BOOTSTRAP_DRUPAL_SITE);
+
+  // Preflight destination in case it defines the alias used by the source
+  _drush_sitealias_get_record($destination);
+
+  // After preflight, get source and destination settings
+  $source_settings = drush_sitealias_get_record($source);
+  $destination_settings = drush_sitealias_get_record($destination);
+
+  // Apply command-specific options.
+  drush_sitealias_command_default_options($source_settings, 'source-');
+  drush_sitealias_command_default_options($destination_settings, 'target-');
+}
+
+function drush_site_merge_validate($source, $destination) {
+  $source_settings = drush_sitealias_overlay_options(drush_sitealias_get_record($source), 'source-');
+  $destination_settings = drush_sitealias_overlay_options(drush_sitealias_get_record($destination), 'target-');
+  $source_config = drush_site_merge_get_config_spec($source_settings, FALSE, 'source-');
+  $target_config = drush_site_merge_get_config_spec($destination_settings, FALSE, 'target-');
+}
+
 /**
  * Implements drush config-merge command
  *
@@ -85,7 +189,10 @@ function site_merge_drush_help($section) {
  * @param $config_label
  *   Which configuration set (active, etaging, etc.) to operate on
  */
-function drush_site_merge_site_merge($alias = '', $config_label = 'sync') {
+function drush_site_merge($source = '', $target = '') {
+
+  //TODO: add a mark as merged without merging feature, so that sites that don't need the functionality can have it appear to be merged and removed.
+  //TODO: add an all sites option
 
   // This has to do XXX things:
   // 1) determine which site is the parent config
@@ -109,72 +216,79 @@ function drush_site_merge_site_merge($alias = '', $config_label = 'sync') {
   // 4) a copy of the target site needs to be added to the branch.
   // 5) a copy of the current parent needs to be added to the master of the repo.
 
-  //STEP1
+  //SETUP
+  //TODO: figure out how to get an alternate site's config directory
+  // (this is probably why aliases were required in config-merge)
 
-  drush_shell_cd_and_exec("/tmp", 'git init ./site-merge');
+  // Figure out what our base commit is going to be for this operation.
+  $merge_info = array(
+    'mypath' => drush_cwd(),
+    'configuration_path' => config_get_config_directory(drush_get_option('label', 'vcs')),
+    'base' => drush_get_option('base', FALSE),
+    'message' => drush_get_option('message', ''),
+    'commit' => !drush_get_option('commit', FALSE),
+    'temp' => drush_get_option('temp', TRUE),
+    'label' => drush_get_option('label', 'vcs'),
+    'source-label' => drush_get_option('source-label', drush_get_option('label', 'vcs')),
+    'target-label' => drush_get_option('target-label', drush_get_option('label', 'vcs')),
+  );
+
+  print_r($merge_info);
 
 
-  //return $result;
+  //STEP 1: create a temp repo
+  $result['GITREPO_BUILD'] = drush_shell_cd_and_exec("/tmp", 'git init /tmp/site-merge');
+
+  //STEP 2: get the ancestor code in
+
+  //go back in time and get the code for the source config
+  $result += _drush_site_merge_copy_config($merge_info['configuration_path'], $merge_info['commit']);
+
+  // Now create a branch to indicate the site moved on.
+  $result['TARGET_BRANCH'] = drush_shell_cd_and_exec("/tmp/site-merge", 'git branch target_site HEAD');
+
+  //STEP 3: update the code for the SOURCE config
+
+  $result += _drush_site_merge_copy_config($merge_info['configuration_path']);
+
+  // now commit all the changes.
+  $result['SOURCE_COMMIT'] = drush_shell_cd_and_exec("/tmp/site-merge", 'git add -A .;git commit -m \'latest source code\'');
+
+  //STEP 4: update the code for the TARGET config
+  $result['TARGET_CHECKOUT'] = drush_shell_cd_and_exec("/tmp/site-merge", 'git checkout target_site');
+
+  //TODO: Figure out where the source/target config locations are stored/referenced
+  $result += _drush_site_merge_copy_config($merge_info['target_configuration_path']);
+
+  //STEP 5: Merge the two configs.
+  // finally, merge the code from target into master, creating a code base where
+  // the changes in site are preferred over the changes in master, and identifying
+  // conflicts where changes happened in two locations.
+
+  $result['TARGET_SWITCH'] = drush_shell_cd_and_exec("/tmp/site-merge", 'git checkout master');
+  $result['TARGET_MERGE'] = drush_shell_cd_and_exec("/tmp/site-merge", 'git merge target_site');
+
+  //TODO: Depending on the result here, we'll want to end processing to allow
+  //todo: users to resolve any conflicts. If there are no conflicts, then we can
+  //todo: wrap this up and copy the result from the temp repo to the actual repo.
+
+  if($result['TARGET_MERGE']) {
+    $result['MAINREPO_CLEAR'] = drush_shell_cd_and_exec("/tmp/site-merge", 'find . -path ./.git -prune -o -exec rm -rf {} \; 2> /dev/null');
+    $result['MAINREPO_COPY'] = drush_shell_cd_and_exec("/tmp/site-merge", 'cp -r . %s', $merge_info['target_configuration_path']);
+  }
+
+  return $result;
 }
 
-/**
- * If drush_config_merge() exits with an error, then Drush will
- * call the rollback function, so that we can clean up.  We call
- * the cleanup function explicitly if we exit with no error.
- */
-function drush_site_merge_config_merge_rollback() {
+function _drush_site_merge_copy_config($configpath, $commit = 'HEAD') {
+  $result['TARGET_CLEAR'] = drush_shell_cd_and_exec("/tmp/site-merge", 'find . -path ./.git -prune -o -exec rm -rf {} \; 2> /dev/null');
+
+  $result['TARGET_COPY'] = drush_shell_cd_and_exec($configpath, 'git archive --prefix=/ %s ./ --format=tar | tar zxf - -C /tmp/site-merge/', $commit);
+
+  return $result;
+}
+
+function drush_site_merge_site_merge_rollback() {
   $merge_info = drush_get_context('DRUSH_CONFIG_MERGE_INFO');
-  _drush_config_extra_merge_cleanup($merge_info);
-
-  // If we messed with the commits on the original branch, then we need to put them back
-  // the way they were if we roll back.  We don't want to do this on an ordinary cleanup, though.
-  if (isset($merge_info['undo-rollback'])) {
-    drush_shell_cd_and_exec($configuration_path, 'git reset --hard %s', $merge_info['merge-base']);
-    drush_shell_cd_and_exec($configuration_path, 'git merge %s', $merge_info['undo-rollback']);
-  }
 }
 
-/**
- * If the user wants to abandon the work of their merge, then
- * clean up our temporary branches and return TRUE to cause
- * the calling function to exit without committing.
- */
-function _drush_site_merge_merge_action_abandon(&$merge_info) {
-  _drush_config_extra_merge_cleanup($merge_info);
-  drush_log(dt("All changes erased."), 'ok');
-  return TRUE;
-}
-
-/* Helper functions */
-
-/**
- * Reset our state after a config-merge command
- */
-function _drush_site_merge_merge_cleanup($merge_info) {
-  if (!empty($merge_info) && !empty($merge_info['configuration_path'])) {
-    $configuration_path = $merge_info['configuration_path'];
-    // If we are in the middle of a rebase, we must abort, or
-    // git will remember this state for a long time (that is,
-    // you can switch away from this branch and come back later,
-    // and you'll still be in a "rebasing" state.)
-    drush_shell_cd_and_exec($configuration_path, 'git rebase --abort');
-    // Violently delete any untracked files in the configuration path
-    // without prompting.  This isn't as dangerous as it sounds;
-    // drush config-merge refuses to run if you have untracked files
-    // here, and you can get anything that Drush config-merge put here
-    // via `drush cex` (or just run config-merge again).
-    drush_shell_cd_and_exec($configuration_path, 'git clean -d -f .');
-    // Switch back to the branch we started on.
-    $result = drush_shell_cd_and_exec($configuration_path, 'git checkout %s', $merge_info['original-branch']);
-    if (!$result) {
-      drush_log(dt("Could not return to original branch !branch", array('!branch' => $merge_info['original-branch'])), 'warning');
-    }
-    // Delete our temporary branches
-    if ($merge_info['autodelete-live-config']) {
-      drush_shell_cd_and_exec($configuration_path, 'git branch -D %s 2>/dev/null', $merge_info['live-config']);
-    }
-    if ($merge_info['autodelete-dev-config']) {
-      drush_shell_cd_and_exec($configuration_path, 'git branch -D %s 2>/dev/null', $merge_info['dev-config']);
-    }
-  }
-}
