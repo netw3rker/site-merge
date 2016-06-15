@@ -1,5 +1,5 @@
 {
-  "name": "drush/site-merge",
+  "name": "netw3rker/site-merge",
   "description": "Merges multi-site configurations from source configs. This is different from config-merge which merges individual sites with their upstream counterparts.",
   "license": "GPL-2.0+",
   "keywords": ["drush"],
