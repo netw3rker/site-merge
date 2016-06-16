@@ -40,10 +40,11 @@ function site_merge_drush_command() {
       'label' => 'The config label to use. This can be more specific with source-label and target-label.',
       'source-label' => 'The config label to use for the source system',
       'target-label' => 'The config label to use for the destination/target.',
-      'ancestor' => 'The location in the git history where the last successful merge took place. If left blank, this will look in the target config for a stored value indicating the last successful merge.',
+      'ancestor-site' => 'The ancestor site config. Use this carefully. ',
+      'ancestor-commit' => 'The location in the git history where the last successful merge took place. If left blank, this will look in the target config for a stored value indicating the last successful merge.',
     ),
     'examples' => array(
-      'drush site-merge [sourcelocation] [targetlocation] --ancestor=C1B2DF' => 'Merge configuration changes from the default site with the configuration changes made on the target site.',
+      'drush site-merge [sourcelocation] [targetlocation] --ancestor-commit=C1B2DF' => 'Merge configuration changes from the default site with the configuration changes made on the target site.',
     ),
     'topics' => array('docs-sm'),
   );
@@ -192,12 +193,16 @@ function drush_site_merge_validate($source, $destination) {
 function drush_site_merge($source = '', $destination = '') {
   $source_settings = drush_sitealias_overlay_options(drush_sitealias_get_record($source), 'source-');
   $destination_settings = drush_sitealias_overlay_options(drush_sitealias_get_record($destination), 'target-');
+  // get the ancestor site settings (normally will be the same as the source settings)
+  $ancestor_settings = drush_sitealias_overlay_options(drush_sitealias_get_record(drush_get_option('ancestor-site', $source)), 'ancestor-');
 
   $source_configs = drush_site_merge_get_config_spec($source_settings, FALSE, 'source-');
   $target_configs = drush_site_merge_get_config_spec($destination_settings, FALSE, 'target-');
+  $ancestor_configs = drush_site_merge_get_config_spec($ancestor_settings, FALSE, 'ancestor-');
 
   $source_options = drush_get_merged_prefixed_options('source-');
   $target_options = drush_get_merged_prefixed_options('target-');
+  $ancestor_options = drush_get_merged_prefixed_options('ancestor-');
 
   //TODO: add a mark as merged without merging feature, so that sites that don't need the functionality can have it appear to be merged and removed.
   //TODO: add an all sites option
@@ -224,15 +229,15 @@ function drush_site_merge($source = '', $destination = '') {
   // 4) a copy of the target site needs to be added to the branch.
   // 5) a copy of the current parent needs to be added to the master of the repo.
 
-  //SETUP
-  //TODO: figure out how to get an alternate site's config directory
-  // (this is probably why aliases were required in config-merge)
-
   // Figure out what our base commit is going to be for this operation.
   $merge_info = array(
     'source-configuration_path' => $source_configs[drush_get_option('source-label', drush_get_option('label', 'vcs'))],
     'target-configuration_path' => $target_configs[drush_get_option('target-label', drush_get_option('label', 'vcs'))],
-    'ancestor' => drush_get_option('ancestor', FALSE),
+    'ancestor-configuration_path' => $ancestor_configs[drush_get_option('ancestor-label', drush_get_option('label', 'vcs'))],
+    'source-commit' => drush_get_option('source-commit', 'HEAD'),
+    'target-commit' => drush_get_option('target-commit', 'HEAD'),
+    'ancestor-commit' => drush_get_option('ancestor-commit', FALSE),
+    'ancestor-site' => drush_get_option('ancestor-site', FALSE),
     'temp' => drush_get_option('temp', TRUE),
   );
 
@@ -242,18 +247,18 @@ function drush_site_merge($source = '', $destination = '') {
 
   //STEP 2: get the ancestor code in
 
-  //go back in time and get the code for the source config
-  $result += _drush_site_merge_copy_config($merge_info['source-configuration_path'], $merge_info['ancestor'], 'ANCESTOR');
+  //go back in time and get the code for the source config before everything diverged
+  $result += _drush_site_merge_copy_config($merge_info['ancestor-configuration_path'], $merge_info['ancestor-commit'], 'ANCESTOR');
 
   // Now create a branch to indicate the site moved on.
   $result['TARGET_BRANCH'] = drush_shell_cd_and_exec("/tmp/site-merge", 'git branch target_site HEAD');
 
   //STEP 3: update the code for the SOURCE config
-  $result += _drush_site_merge_copy_config($merge_info['source-configuration_path'], 'HEAD', 'SOURCE');
+  $result += _drush_site_merge_copy_config($merge_info['source-configuration_path'], $merge_info['source-commit'], 'SOURCE');
 
   //STEP 4: update the code for the TARGET config
   $result['TARGET_CHECKOUT'] = drush_shell_cd_and_exec("/tmp/site-merge", 'git checkout target_site');
-  $result += _drush_site_merge_copy_config($merge_info['target-configuration_path'], 'HEAD', 'TARGET');
+  $result += _drush_site_merge_copy_config($merge_info['target-configuration_path'], $merge_info['target-commit'], 'TARGET');
 
   //STEP 5: Merge the two configs.
   // finally, merge the code from target into master, creating a code base where
@@ -266,7 +271,8 @@ function drush_site_merge($source = '', $destination = '') {
 
   if($result['TARGET_MERGE']) {
     $result['MAINREPO_CLEAR'] = drush_shell_cd_and_exec($merge_info['target-configuration_path'], 'find . -path ./.git -prune -o -exec rm -rf {} \; 2> /dev/null');
-    $result['MAINREPO_COPY'] = drush_shell_cd_and_exec("/tmp/site-merge", 'cp -r . %s', $merge_info['target-configuration_path']);
+    //TODO: I guess it's safe to clear this folder before copying to ensure that deletes take place. for now though, let the user perform the copy
+    //$result['MAINREPO_COPY'] = drush_shell_cd_and_exec("/tmp/site-merge", 'cp -r . %s', $merge_info['target-configuration_path']);
   }
   else {
     //TODO: implement the --continue option
